@@ -33,11 +33,20 @@ namespace ReadOnlyEditorToggle
                 IsHitTestVisible = false
             };
 
-            _container = new Grid();
+            _container = new Grid
+            {
+                Visibility = Visibility.Collapsed
+            };
+
             _container.Children.Add(_tint);
             _container.Children.Add(_border);
 
-            _layer.AddAdornment(AdornmentPositioningBehavior.ViewportRelative, null, null, _container, null);
+            _layer.AddAdornment(
+                AdornmentPositioningBehavior.ViewportRelative,
+                null,
+                null,
+                _container,
+                null);
         }
 
         public void Update(bool visible, double width, double height)

@@ -1,32 +1,48 @@
 ﻿using Microsoft.VisualStudio.Editor;
 using Microsoft.VisualStudio.Text;
+using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.TextManager.Interop;
+
+using System;
 
 namespace ReadOnlyEditorToggle
 {
-    public class ReadOnlyController
+    public sealed class ReadOnlyController
     {
-        private readonly ITextBuffer _Buffer;
-        private readonly IVsEditorAdaptersFactoryService _Adapter;
-        private ITextSnapshot _Snapshot;
-        private IReadOnlyRegion _Region;
+        private readonly ITextBuffer _subjectBuffer;
+        private readonly IVsEditorAdaptersFactoryService _adapter;
+        private readonly ReadOnlyAdornmentVisuals _visuals;
+        private readonly IWpfTextView _view;
 
-        private ReadOnlyController(ITextBuffer buffer, IVsEditorAdaptersFactoryService adapter)
-        {
-            _Buffer = buffer;
-            _Adapter = adapter;
-        }
+        private bool _lastReadOnly;
+        private double _lastWidth;
+        private double _lastHeight;
+        private IReadOnlyRegion _Region;
+        private ITextSnapshot _Snapshot;
+
         public bool IsLocked { get; private set; }
 
-        public static ReadOnlyController GetOrCreate(ITextBuffer buffer, IVsEditorAdaptersFactoryService adapter)
+        public ReadOnlyController(IWpfTextView view, IVsEditorAdaptersFactoryService adapter)
         {
-            if (!buffer.Properties.TryGetProperty(typeof(ReadOnlyController), out ReadOnlyController controller))
-            {
-                controller = new ReadOnlyController(buffer, adapter);
-                buffer.Properties.AddProperty(typeof(ReadOnlyController), controller);
-            }
+            _view = view;
+            _adapter = adapter;
 
-            return controller;
+            // Always operate on the subject (document) buffer
+            _subjectBuffer = adapter.GetDocumentBuffer((IVsTextBuffer)view.TextBuffer);
+
+            _visuals = new ReadOnlyAdornmentVisuals(view);
+
+            _lastReadOnly = _subjectBuffer.IsReadOnly(0);
+            _lastWidth = view.ViewportWidth;
+            _lastHeight = view.ViewportHeight;
+
+            view.TextBuffer.ReadOnlyRegionsChanged += OnReadOnlyChanged;
+            view.ViewportWidthChanged += OnViewportChanged;
+            view.ViewportHeightChanged += OnViewportChanged;
+            view.LayoutChanged += OnLayoutChanged;
+            view.Closed += OnClosed;
+
+            Update();
         }
 
         public void Toggle()
@@ -42,17 +58,22 @@ namespace ReadOnlyEditorToggle
             if (IsLocked)
                 return;
 
-            using (IReadOnlyRegionEdit edit = _Buffer.CreateReadOnlyRegionEdit())
+            using (IReadOnlyRegionEdit edit = _subjectBuffer.CreateReadOnlyRegionEdit())
             {
-                _Snapshot = _Buffer.CurrentSnapshot;
-                _Region = edit.CreateReadOnlyRegion(new Span(0, _Snapshot.Length));
-                _ = edit.Apply();
+                ITextSnapshot snapshot = _subjectBuffer.CurrentSnapshot;
+                edit.CreateReadOnlyRegion(new Span(0, snapshot.Length));
+                edit.Apply();
             }
 
-            // Set tab lock icon
-            if (_Adapter.GetBufferAdapter(_Buffer) is IVsTextBuffer vsBuffer)
-                _ = vsBuffer.SetStateFlags((uint)BUFFERSTATEFLAGS.BSF_USER_READONLY);
+            if (_adapter.GetBufferAdapter(_subjectBuffer) is IVsTextBuffer vsBuffer)
+            {
+                vsBuffer.GetStateFlags(out uint flags);
+                flags |= (uint)BUFFERSTATEFLAGS.BSF_USER_READONLY;
+                vsBuffer.SetStateFlags(flags);
+            }
+
             IsLocked = true;
+            Update();
         }
 
         private void Unlock()
@@ -60,19 +81,66 @@ namespace ReadOnlyEditorToggle
             if (!IsLocked)
                 return;
 
-            using (IReadOnlyRegionEdit edit = _Buffer.CreateReadOnlyRegionEdit())
+            using (IReadOnlyRegionEdit edit = _subjectBuffer.CreateReadOnlyRegionEdit())
             {
-                edit.RemoveReadOnlyRegion(_Region);
-                _ = edit.Apply();
+                if (_Region != null)
+                    edit.RemoveReadOnlyRegion(_Region);
+
+                edit.Apply();
             }
 
-            // Remove tab lock icon
-            if (_Adapter.GetBufferAdapter(_Buffer) is IVsTextBuffer vsBuffer)
-                _ = vsBuffer.SetStateFlags(0);
+            if (_adapter.GetBufferAdapter(_subjectBuffer) is IVsTextBuffer vsBuffer)
+            {
+                vsBuffer.GetStateFlags(out uint flags);
+                flags &= ~(uint)BUFFERSTATEFLAGS.BSF_USER_READONLY;
+                vsBuffer.SetStateFlags(flags);
+            }
 
-            _Region = null;
-            _Snapshot = null;
             IsLocked = false;
+            Update();
+        }
+
+        private void OnReadOnlyChanged(object sender, SnapshotSpanEventArgs e)
+        {
+            Update();
+        }
+
+        private void OnViewportChanged(object sender, EventArgs e)
+        {
+            Update();
+        }
+
+        private void OnLayoutChanged(object sender, TextViewLayoutChangedEventArgs e)
+        {
+            Update();
+        }
+
+        private void Update()
+        {
+            bool isReadOnly = _subjectBuffer.IsReadOnly(0);
+            double width = _view.ViewportWidth;
+            double height = _view.ViewportHeight;
+
+            bool stateChanged = isReadOnly != _lastReadOnly;
+            bool sizeChanged = width != _lastWidth || height != _lastHeight;
+
+            if (!stateChanged && !sizeChanged)
+                return;
+
+            _lastReadOnly = isReadOnly;
+            _lastWidth = width;
+            _lastHeight = height;
+
+            _visuals.Update(isReadOnly, width, height);
+        }
+
+        private void OnClosed(object sender, EventArgs e)
+        {
+            _view.TextBuffer.ReadOnlyRegionsChanged -= OnReadOnlyChanged;
+            _view.ViewportWidthChanged -= OnViewportChanged;
+            _view.ViewportHeightChanged -= OnViewportChanged;
+            _view.LayoutChanged -= OnLayoutChanged;
+            _view.Closed -= OnClosed;
         }
     }
 }
